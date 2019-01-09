@@ -20,15 +20,6 @@ flags+=(CROSS=1 "HOSTCC=$CC_FOR_BUILD" PREFIX=/ "CROSS_SUFFIX=${target}-")
 # We need to use our basic objconv, not a prefixed one:
 flags+=(OBJCONV=objconv)
 
-if [[ ${nbits} == 64 ]]; then
-    # If we're building for a 64-bit platform, engage ILP64
-    LIBPREFIX=libopenblas64_
-    flags+=(INTERFACE64=1 SYMBOLSUFFIX=64_)
-else
-    LIBPREFIX=libopenblas
-fi
-flags+=("LIBPREFIX=${LIBPREFIX}")
-
 # Set BINARY=32 on 32-bit platforms
 if [[ ${nbits} == 32 ]]; then
     flags+=(BINARY=32)
@@ -58,42 +49,58 @@ elif [[ ${target} == powerpc64le-* ]]; then
     flags+=(TARGET=POWER8)
 fi
 
+flagscommon=(${flags[@]})
+
 # Enter the fun zone
 cd ${WORKSPACE}/srcdir/OpenBLAS-*/
 
 # Patch so that our LDFLAGS make it all the way through
 atomic_patch -p1 "${WORKSPACE}/srcdir/patches/osx_exports_ldflags.patch"
 
-# Build the library
-make "${flags[@]}" -j${nproc}
+for bits in 32 64; do
+    # nbits?
+    if [[ ${bits} == 32 ]]; then
+        flags=(${flagscommon[@]} LIBPREFIX=libopenblas)
+        LIBPREFIX=libopenblas
+    else
+        if [[ ${nbits} != 64 ]]; then
+            break
+        fi
+        make clean
+        flags=(${flagscommon[@]} LIBPREFIX=libopenblas64_ INTERFACE64=1 SYMBOLSUFFIX=64_)
+        LIBPREFIX=libopenblas64_
+    fi
+    # Build the library
+    make "${flags[@]}" -j${nproc}
 
-# Install the library
-make "${flags[@]}" "PREFIX=$prefix" install
+    # Install the library
+    make "${flags[@]}" "PREFIX=$prefix" install
 
-# Force the library to be named the same as in Julia-land.
-# Move things around, fix symlinks, and update install names/SONAMEs.
-ls -la ${prefix}/lib
-for f in ${prefix}/lib/libopenblas*p-r0*; do
-    name=${LIBPREFIX}.0.${f#*.}
+    # Force the library to be named the same as in Julia-land.
+    # Move things around, fix symlinks, and update install names/SONAMEs.
+    ls -la ${prefix}/lib
+    for f in ${prefix}/lib/libopenblas*p-r0*; do
+        name=${LIBPREFIX}.0.${f#*.}
 
-    # Move this file to a julia-compatible name
-    mv -v ${f} ${prefix}/lib/${name}
+        # Move this file to a julia-compatible name
+        mv -v ${f} ${prefix}/lib/${name}
 
-    # If there were links that are now broken, fix 'em up
-    for l in $(find ${prefix}/lib -xtype l); do
-        if [[ $(basename $(readlink ${l})) == $(basename ${f}) ]]; then
-            ln -vsf ${name} ${l}
+        # If there were links that are now broken, fix 'em up
+        for l in $(find ${prefix}/lib -xtype l); do
+            if [[ $(basename $(readlink ${l})) == $(basename ${f}) ]]; then
+                ln -vsf ${name} ${l}
+            fi
+        done
+
+        # If this file was a .so or .dylib, set its SONAME/install name
+        if [[ ${f} == *.so.* ]] || [[ ${f} == *.dylib ]]; then 
+            if [[ ${target} == *linux* ]] || [[ ${target} == *freebsd* ]]; then
+                patchelf --set-soname ${name} ${prefix}/lib/${name}
+            elif [[ ${target} == *apple* ]]; then
+                install_name_tool -id ${name} ${prefix}/lib/${name}
+            fi
         fi
     done
-
-    # If this file was a .so or .dylib, set its SONAME/install name
-    if [[ ${f} == *.so.* ]] || [[ ${f} == *.dylib ]]; then 
-        if [[ ${target} == *linux* ]] || [[ ${target} == *freebsd* ]]; then
-            patchelf --set-soname ${name} ${prefix}/lib/${name}
-        elif [[ ${target} == *apple* ]]; then
-            install_name_tool -id ${name} ${prefix}/lib/${name}
-        fi
-    fi
 done
 """
 
